@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hearthly</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        #recordBtn, #stopBtn {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        #stopBtn {
+            display: none;
+        }
+        #transcript {
+            margin-top: 20px;
+            max-width: 600px;
+            padding: 10px;
+            background-color: white;
+            border-radius: 5px;
+        }
+        #audioResponse {
+            margin-top: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+        }
+        .modes {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 10px;
+        }
+        .modes label {
+            margin: 0 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Hearthly</h1>
+    <div class="controls">
+        <select id="language">
+            <option value="en">English</option>
+            <option value="hi">Hindi</option>
+            <option value="pa">Punjabi</option>
+        </select>
+        <div class="modes">
+            <label><input type="checkbox" id="genzMode"> Gen Z Mode</label>
+            <label><input type="checkbox" id="sarcasticMode"> Sarcastic Mode</label>
+            <label><input type="checkbox" id="shenaniganMode"> Shenanigan Mode</label>
+            <label><input type="checkbox" id="seductiveMode"> Seductive Mode</label>
+        </div>
+        <button id="recordBtn">Record</button>
+        <button id="stopBtn">Stop</button>
+    </div>
+    <div id="transcript">Transcript will appear here...</div>
+    <audio id="audioResponse" controls onerror="console.error('Audio element error:', this.error)"></audio>
+
+    <script>
+        const recordBtn = document.getElementById('recordBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const audioResponseEl = document.getElementById('audioResponse');
+        const transcriptEl = document.getElementById('transcript');
+        const languageSelect = document.getElementById('language');
+        const genzMode = document.getElementById('genzMode');
+        const sarcasticMode = document.getElementById('sarcasticMode');
+        const shenaniganMode = document.getElementById('shenaniganMode');
+        const seductiveMode = document.getElementById('seductiveMode');
+
+        let mediaRecorder;
+        let audioChunks = [];
+
+        recordBtn.addEventListener('click', async () => {
+            console.log('Record button clicked');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                console.log('Microphone access granted');
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        console.log('Audio chunk received');
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = async () => {
+                    console.log('Recording stopped');
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const reader = new FileReader();
+                    reader.readAsDataURL(audioBlob);
+                    reader.onloadend = async () => {
+                        const base64Audio = reader.result.split(',')[1];
+                        const payload = {
+                            audio: base64Audio,
+                            language: languageSelect.value,
+                            genz_mode: genzMode.checked,
+                            sarcastic_mode: sarcasticMode.checked,
+                            shenanigan_mode: shenaniganMode.checked,
+                            seductive_mode: seductiveMode.checked,
+                        };
+                        console.log('Sending to backend:', payload);
+                        try {
+                            const response = await fetch('/process-audio', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(payload),
+                            });
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
+                            }
+                            const data = await response.json();
+                            console.log('Response received:', data);
+                            console.log('Audio base64 length:', data.audio.length);
+                            // Validate base64
+                            if (!data.audio || !/^[A-Za-z0-9+/=]+$/.test(data.audio)) {
+                                throw new Error('Invalid base64 audio data');
+                            }
+                            const dataUri = `data:audio/mp3;base64,${data.audio}`;
+                            console.log('Audio data URI:', dataUri);
+                            transcriptEl.textContent = data.transcript || 'No transcript received';
+                            audioResponseEl.src = dataUri;
+                            audioResponseEl.load(); // Ensure audio reloads
+                            console.log('Attempting to play audio...');
+                            audioResponseEl.play()
+                                .then(() => console.log('Audio playback started'))
+                                .catch(e => console.error('Playback error:', e));
+                        } catch (error) {
+                            console.error('Fetch error:', error);
+                            transcriptEl.textContent = 'Error processing audio';
+                        }
+                    };
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                mediaRecorder.start();
+                console.log('Recording started');
+                recordBtn.style.display = 'none';
+                stopBtn.style.display = 'inline-block';
+            } catch (error) {
+                console.error('Microphone access error:', error);
+                transcriptEl.textContent = 'Error accessing microphone';
+            }
+        });
+
+        stopBtn.addEventListener('click', () => {
+            console.log('Stop button clicked');
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                recordBtn.style.display = 'inline-block';
+                stopBtn.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
