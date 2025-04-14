@@ -1,5 +1,5 @@
 # Stage 1: Build the Rust application
-FROM rust@sha256:80729b1687999357d0ff63e1e1e68a4f2f7a4788fdf51f23442feddd18eeef41 AS builder
+FROM rust:1.86-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -19,16 +19,16 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs
 # Build dependencies to cache them
 RUN cargo build --release
 
-# Remove dummy main.rs and copy actual source code
+# Remove dummy and add actual source code
 RUN rm -rf src
 COPY src ./src
 COPY static ./static
 
-# Build the actual application
+# Final application build
 RUN cargo build --release
 
 # Stage 2: Create a runtime image with FFmpeg
-FROM debian@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+FROM debian:bookworm-slim
 
 # Install FFmpeg and runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -36,10 +36,10 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled binary from the builder stage
+# Copy the compiled binary from builder
 COPY --from=builder /usr/src/app/target/release/hearthly-api /usr/local/bin/hearthly-api
 
-# Set environment variables
+# Set environment variables and expose port
 ENV PORT=8080
 EXPOSE 8080
 
