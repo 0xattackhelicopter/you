@@ -485,10 +485,14 @@ async fn process_audio(req: web::Json<AudioRequest>) -> ActixResult<web::Json<Au
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
+    // Load .env for local development (optional in Cloud Run)
     dotenv().ok();
-    env_logger::init();
+
+    // Initialize logger with INFO level
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     info!("Starting Hearthly API server");
 
+    // Set up Handlebars
     let mut handlebars = Handlebars::new();
     handlebars
         .register_template_string("index", include_str!("../static/index.html"))
@@ -496,11 +500,15 @@ async fn main() -> io::Result<()> {
 
     let handlebars_data = web::Data::new(handlebars);
 
-    info!("Binding server to 0.0.0.0:8080");
+    // Read PORT from environment, default to 8080
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let address = format!("0.0.0.0:{}", port);
+    info!("Binding server to {}", address);
+
     HttpServer::new(move || {
         App::new()
             .wrap(
-                Cors::default()
+                actix_web::middleware::Cors::default()
                     .allow_any_origin()
                     .allow_any_method()
                     .allow_any_header()
@@ -510,7 +518,7 @@ async fn main() -> io::Result<()> {
             .service(get_index)
             .service(process_audio)
     })
-    .bind(("0.0.0.0", 8080))
+    .bind(&address)
     .map_err(|e| {
         error!("Failed to bind server: {}", e);
         e
