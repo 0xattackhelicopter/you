@@ -9,10 +9,10 @@ use log::{error, info, debug};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use thiserror::Error;
 use reqwest::Client;
-use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Error, Debug)]
 enum AudioError {
@@ -46,8 +46,8 @@ struct AudioResponse {
     transcript: String,
 }
 
-fn convert_audio_to_pcm16_24khz(audio_base64: &str) -> Result<String, AudioError> {
-    debug!("Converting WebM to PCM");
+fn convert_audio_to_pcm16_24khz(audio_base64: &str) -> Result<Vec<u8>, AudioError> {
+    debug!("Converting WebM to PCM in memory");
     let audio_bytes = general_purpose::STANDARD
         .decode(audio_base64)
         .map_err(|e| {
@@ -55,52 +55,51 @@ fn convert_audio_to_pcm16_24khz(audio_base64: &str) -> Result<String, AudioError
             AudioError::Base64(e)
         })?;
 
-    let webm_path = "temp_input.webm";
-    std::fs::write(webm_path, &audio_bytes).map_err(|e| {
-        error!("Failed to write WebM file: {}", e);
-        AudioError::Io(e)
-    })?;
-
-    let wav_path = "debug_pcm.wav";
-    let ffmpeg_output = Command::new("ffmpeg")
+    let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-i",
-            webm_path,
-            "-ac",
-            "1",
-            "-ar",
-            "24000",
-            "-acodec",
-            "pcm_s16le",
+            "-i", "pipe:0", // Read from stdin
+            "-ac", "1",
+            "-ar", "24000",
+            "-acodec", "pcm_s16le",
+            "-f", "wav",
             "-y",
-            wav_path,
+            "pipe:1", // Output to stdout
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| {
             error!("FFmpeg command failed: {}", e);
             AudioError::FFmpeg(e.to_string())
         })?;
 
-    let ffmpeg_stderr = String::from_utf8_lossy(&ffmpeg_output.stderr);
+    // Write input to FFmpeg stdin
+    if let Some(mut stdin) = ffmpeg.stdin.take() {
+        std::io::Write::write_all(&mut stdin, &audio_bytes).map_err(|e| {
+            error!("Failed to write to FFmpeg stdin: {}", e);
+            AudioError::Io(e)
+        })?;
+    }
+
+    let output = ffmpeg.wait_with_output().map_err(|e| {
+        error!("FFmpeg failed to complete: {}", e);
+        AudioError::FFmpeg(e.to_string())
+    })?;
+
+    let ffmpeg_stderr = String::from_utf8_lossy(&output.stderr);
     debug!("FFmpeg PCM stderr: {}", ffmpeg_stderr);
 
-    if !ffmpeg_output.status.success() {
-        let _ = std::fs::remove_file(webm_path);
+    if !output.status.success() {
         error!("FFmpeg PCM failed: {}", ffmpeg_stderr);
         return Err(AudioError::FFmpeg(ffmpeg_stderr.to_string()));
     }
 
-    let wav_bytes = std::fs::read(wav_path).map_err(|e| {
-        error!("Failed to read WAV file: {}", e);
-        AudioError::Io(e)
-    })?;
-    let _ = std::fs::remove_file(webm_path);
-
-    debug!("PCM conversion successful, WAV size: {} bytes", wav_bytes.len());
-    Ok(general_purpose::STANDARD.encode(&wav_bytes))
+    debug!("PCM conversion successful, WAV size: {} bytes", output.stdout.len());
+    Ok(output.stdout)
 }
 
-async fn transcribe_audio(wav_path: &str, language: &str) -> Result<String, AudioError> {
+async fn transcribe_audio(wav_bytes: &[u8], language: &str) -> Result<String, AudioError> {
     debug!("Transcribing audio with Whisper");
     let client = Client::new();
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -113,16 +112,12 @@ async fn transcribe_audio(wav_path: &str, language: &str) -> Result<String, Audi
         _ => return Err(AudioError::InvalidLanguage),
     };
 
-    let wav_bytes = fs::read(wav_path)
-        .await
-        .map_err(|e| AudioError::Io(e))?;
-
     let form = reqwest::multipart::Form::new()
         .text("model", "whisper-1")
         .text("language", language_code)
         .part(
             "file",
-            reqwest::multipart::Part::bytes(wav_bytes)
+            reqwest::multipart::Part::bytes(wav_bytes.to_vec())
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
                 .map_err(|e| AudioError::OpenAI(e.to_string()))?,
@@ -244,45 +239,51 @@ async fn text_to_speech(text: &str, language: &str) -> Result<Vec<u8>, AudioErro
     Ok(mp3_bytes)
 }
 
-fn convert_audio_to_mp3(wav_path: &str) -> Result<String, AudioError> {
-    debug!("Converting WAV to MP3");
-    let mp3_path = "debug_mp3.mp3";
-    let ffmpeg_output = Command::new("ffmpeg")
+fn convert_audio_to_mp3(wav_bytes: &[u8]) -> Result<Vec<u8>, AudioError> {
+    debug!("Converting WAV to MP3 in memory");
+    let mut ffmpeg = Command::new("ffmpeg")
         .args([
-            "-i",
-            wav_path,
-            "-acodec",
-            "mp3",
-            "-b:a",
-            "128k",
-            "-ac",
-            "1",
-            "-ar",
-            "24000",
+            "-i", "pipe:0", // Read from stdin
+            "-acodec", "mp3",
+            "-b:a", "128k",
+            "-ac", "1",
+            "-ar", "24000",
+            "-f", "mp3",
             "-y",
-            mp3_path,
+            "pipe:1", // Output to stdout
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| {
             error!("FFmpeg command failed: {}", e);
             AudioError::FFmpeg(e.to_string())
         })?;
 
-    let ffmpeg_stderr = String::from_utf8_lossy(&ffmpeg_output.stderr);
+    // Write input to FFmpeg stdin
+    if let Some(mut stdin) = ffmpeg.stdin.take() {
+        std::io::Write::write_all(&mut stdin, wav_bytes).map_err(|e| {
+            error!("Failed to write to FFmpeg stdin: {}", e);
+            AudioError::Io(e)
+        })?;
+    }
+
+    let output = ffmpeg.wait_with_output().map_err(|e| {
+        error!("FFmpeg failed to complete: {}", e);
+        AudioError::FFmpeg(e.to_string())
+    })?;
+
+    let ffmpeg_stderr = String::from_utf8_lossy(&output.stderr);
     debug!("FFmpeg MP3 stderr: {}", ffmpeg_stderr);
 
-    if !ffmpeg_output.status.success() {
+    if !output.status.success() {
         error!("FFmpeg MP3 failed: {}", ffmpeg_stderr);
         return Err(AudioError::FFmpeg(ffmpeg_stderr.to_string()));
     }
 
-    let mp3_bytes = std::fs::read(mp3_path).map_err(|e| {
-        error!("Failed to read MP3 file: {}", e);
-        AudioError::Io(e)
-    })?;
-
-    debug!("MP3 conversion successful, MP3 size: {} bytes", mp3_bytes.len());
-    Ok(general_purpose::STANDARD.encode(&mp3_bytes))
+    debug!("MP3 conversion successful, MP3 size: {} bytes", output.stdout.len());
+    Ok(output.stdout)
 }
 
 fn get_language_instructions(
@@ -385,18 +386,16 @@ async fn process_openai_realtime(
         return Err(AudioError::InvalidLanguage);
     }
 
-    // Decode PCM base64 and save to temporary WAV
+    // Decode PCM base64
     let pcm_bytes = general_purpose::STANDARD
         .decode(&pcm_audio_base64)
         .map_err(|e| {
             error!("Base64 decode failed: {}", e);
             AudioError::Base64(e)
         })?;
-    let wav_path = "temp_input.wav";
-    fs::write(wav_path, &pcm_bytes).await.map_err(|e| AudioError::Io(e))?;
 
     // Transcribe audio
-    let transcript = transcribe_audio(wav_path, &language).await?;
+    let transcript = transcribe_audio(&pcm_bytes, &language).await?;
 
     // Generate therapist response
     let response_text = generate_therapist_response(
@@ -412,15 +411,6 @@ async fn process_openai_realtime(
     // Convert response to speech
     let mp3_bytes = text_to_speech(&response_text, &language).await?;
     let mp3_base64 = general_purpose::STANDARD.encode(&mp3_bytes);
-
-    // Save MP3 for debugging
-    let debug_mp3_path = "debug_mp3.mp3";
-    fs::write(debug_mp3_path, &mp3_bytes).await.map_err(|e| {
-        error!("Failed to write debug MP3: {}", e);
-        AudioError::Io(e)
-    })?;
-
-    let _ = fs::remove_file(wav_path).await;
 
     debug!("Response transcript: {}", transcript);
     debug!("MP3 base64 length: {}", mp3_base64.len());
@@ -446,16 +436,23 @@ async fn get_index(hb: web::Data<Handlebars<'_>>) -> impl Responder {
     HttpResponse::Ok().content_type("text/html").body(body)
 }
 
+#[get("/health")]
+async fn health() -> impl Responder {
+    HttpResponse::Ok().body("OK")
+}
+
 #[post("/process-audio")]
 async fn process_audio(req: web::Json<AudioRequest>) -> ActixResult<web::Json<AudioResponse>> {
     info!("Received /process-audio request: language={}, genz_mode={}", req.language, req.genz_mode);
     debug!("Input audio base64 length: {}", req.audio.len());
 
-    let pcm_audio_base64 = convert_audio_to_pcm16_24khz(&req.audio)
+    let pcm_audio_bytes = convert_audio_to_pcm16_24khz(&req.audio)
         .map_err(|e| {
             error!("Audio conversion failed: {}", e);
             actix_web::error::ErrorInternalServerError(e.to_string())
         })?;
+
+    let pcm_audio_base64 = general_purpose::STANDARD.encode(&pcm_audio_bytes);
 
     debug!("PCM audio base64 length: {}", pcm_audio_base64.len());
 
@@ -485,23 +482,28 @@ async fn process_audio(req: web::Json<AudioRequest>) -> ActixResult<web::Json<Au
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
-    // Load .env for local development (optional in Cloud Run)
     dotenv().ok();
-
-    // Initialize logger with INFO level
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     info!("Starting Hearthly API server");
 
-    // Set up Handlebars
+    // Verify static directory
+    if let Ok(entries) = std::fs::read_dir("static") {
+        for entry in entries {
+            info!("Static file: {:?}", entry);
+        }
+    } else {
+        error!("Static directory not found");
+    }
+
     let mut handlebars = Handlebars::new();
+    info!("Registering Handlebars template");
     handlebars
         .register_template_string("index", include_str!("../static/index.html"))
         .expect("Failed to register template");
+    info!("Handlebars template registered");
 
     let handlebars_data = web::Data::new(handlebars);
-
-    // Read PORT from environment, default to 8080
-    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let address = format!("0.0.0.0:{}", port);
     info!("Binding server to {}", address);
 
@@ -516,6 +518,7 @@ async fn main() -> io::Result<()> {
             )
             .app_data(handlebars_data.clone())
             .service(get_index)
+            .service(health)
             .service(process_audio)
     })
     .bind(&address)
