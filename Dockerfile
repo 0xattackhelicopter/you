@@ -28,7 +28,7 @@ COPY static ./static
 RUN cargo build --release
 
 # Stage 2: Create a runtime image with FFmpeg
-FROM debian:bookworm-slim
+FROM debian:stable-slim
 
 # Install FFmpeg and runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -36,12 +36,21 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Set working directory for runtime
+WORKDIR /app
+
 # Copy the compiled binary from builder
-COPY --from=builder /usr/src/app/target/release/hearthly-api /usr/local/bin/hearthly-api
+COPY --from=builder /usr/src/app/target/release/hearthly-api /app/hearthly-api
+
+# Copy static files (if needed by the application at runtime)
+COPY --from=builder /usr/src/app/static ./static
 
 # Set environment variables and expose port
 ENV PORT=8080
 EXPOSE 8080
 
+# Ensure the binary is executable
+RUN chmod +x /app/hearthly-api
+
 # Run the binary
-CMD ["/usr/local/bin/hearthly-api"]
+CMD ["/app/hearthly-api"]

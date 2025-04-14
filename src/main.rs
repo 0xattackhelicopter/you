@@ -496,7 +496,7 @@ async fn main() -> io::Result<()> {
 
     let handlebars_data = web::Data::new(handlebars);
 
-    info!("Binding server to 0.0.0.0:8000");
+    info!("Binding server to 0.0.0.0:8080");
     HttpServer::new(move || {
         App::new()
             .wrap(
